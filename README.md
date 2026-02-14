@@ -35,6 +35,7 @@ The goal is to explore how sparse, global feedback signals can coordinate local 
 
     ```bash
     pip install -r requirements.txt
+    # Note: Requires scikit-learn for metrics calculation
     ```
 
 ## 🚀 Usage Guide
@@ -52,7 +53,7 @@ python main.py --experiment <EXPERIMENT_NAME> [OPTIONS]
 | Argument | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--experiment` | `str` | `all` | The experiment to run. Options: `all`, `backprop`, `pure_local`, `eglp_fixed`, `eglp_triggered`, `ablation_rate`, `linear_probe`, `layer_sensitivity`, `robustness`. |
-| `--epochs` | `int` | `20` | Number of training epochs. |
+| `--epochs` | `int` | `30` | Number of training epochs. |
 | `--batch_size` | `int` | `128` | Batch size for training and evaluation. |
 | `--local_lr` | `float` | `0.0001` | Learning rate for local updates. |
 | `--event_budget` | `int` | `1000` | Maximum number of events for the `ThresholdController`. |
@@ -70,13 +71,13 @@ To compare EGLP against baselines (Backprop and Pure Hebbian):
 
 ```bash
 # Run standard backpropagation baseline
-python main.py --experiment backprop --epochs 20
+python main.py --experiment backprop --epochs 30 --hidden_dims "256,128"
 
 # Run pure local learning (events always on) - Lower Bound
-python main.py --experiment pure_local --epochs 20
+python main.py --experiment pure_local --epochs 30 --hidden_dims "256,128"
 
 # Run EGLP with triggered events (dynamic thresholding) - Main Method
-python main.py --experiment eglp_triggered --epochs 20 --event_budget 1000 --threshold_factor 2.0
+python main.py --experiment eglp_triggered --epochs 30 --event_budget 1000 --threshold_factor 2.0 --hidden_dims "256,128"
 
 ```
 
