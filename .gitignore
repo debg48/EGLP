@@ -1,3 +1,5 @@
 results
 env
 __pycache__
+.*
+data

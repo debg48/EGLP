@@ -43,13 +43,13 @@ class ExperimentConfig:
     
     # Training
     epochs: int = 20
-    local_lr: float = 0.01
+    local_lr: float = 0.0001
     backprop_lr: float = 0.001
     
     # EGLP
     event_budget: int = 1000
-    event_rate: float = 0.1
-    threshold_factor: float = 1.5
+    event_rate: float = 0.05
+    threshold_factor: float = 2.0
     
     # Misc
     seed: int = 42
@@ -157,10 +157,7 @@ class ExperimentRunner:
             for data, target in loader:
                 data, target = data.to(self.config.device), target.to(self.config.device)
                 
-                if is_eglp:
-                    output = model(data)
-                else:
-                    output = model(data)
+                output = model(data)
                 
                 loss = criterion(output, target)
                 total_loss += loss.item() * data.size(0)
@@ -324,8 +321,18 @@ class ExperimentRunner:
         logger: MetricsLogger,
         name: str,
     ) -> MetricsLogger:
-        """Core EGLP training loop."""
+        """Core EGLP hybrid training loop.
+        
+        Hidden layers: local Hebbian updates modulated by error signal
+        Output layer: supervised backprop (only 1 layer, minimal communication)
+        """
         criterion = nn.CrossEntropyLoss()
+        
+        # Optimizer for output layer ONLY
+        optimizer = optim.Adam(
+            model.get_output_params(), 
+            lr=self.config.backprop_lr,
+        )
         
         for epoch in range(self.config.epochs):
             model.train()
@@ -337,17 +344,23 @@ class ExperimentRunner:
             for data, target in self.train_loader:
                 data, target = data.to(self.config.device), target.to(self.config.device)
                 
-                # Forward pass (no gradients!)
-                with torch.no_grad():
-                    output = model(data, store_representations=(epoch == self.config.epochs - 1))
-                    loss = criterion(output, target)
+                # Forward pass: hidden layers (no grad) + output layer (grad)
+                optimizer.zero_grad()
+                output = model(data, store_representations=(epoch == self.config.epochs - 1))
                 
-                # Controller decides whether to trigger event
-                event = controller.should_trigger(loss.item())
-                epoch_events += event
+                # Compute loss with gradients for output layer
+                loss = criterion(output, target)
                 
-                # Local update with event signal
-                model.local_update_all(event)
+                # Backprop ONLY the output layer
+                loss.backward()
+                optimizer.step()
+                
+                # Controller decides event signal (continuous float)
+                error_signal = controller.should_trigger(loss.item())
+                epoch_events += (1 if error_signal > 0 else 0)
+                
+                # Local update for hidden layers with error modulation
+                model.local_update_all(error_signal)
                 model.clear_activations()
                 
                 # Metrics
@@ -372,7 +385,7 @@ class ExperimentRunner:
                         )
                         cka_scores[layer_idx] = cka
             
-            # FLOPs (forward only for EGLP)
+            # FLOPs (forward only for hidden layers + forward+backward for output)
             flops = estimate_flops(model, (self.config.input_dim,), include_backward=False)
             flops *= len(self.train_loader)
             
@@ -453,20 +466,28 @@ class ExperimentRunner:
             threshold_factor=self.config.threshold_factor,
         )
         
+        # Optimizer for output layer during backbone training
+        backbone_optimizer = optim.Adam(
+            backbone.get_output_params(), lr=self.config.backprop_lr
+        )
+        criterion = nn.CrossEntropyLoss()
+        
         print("Training EGLP backbone...")
         for epoch in range(self.config.epochs):
             for data, target in self.train_loader:
                 data, target = data.to(self.config.device), target.to(self.config.device)
                 
-                with torch.no_grad():
-                    output = backbone(data)
-                    loss = nn.CrossEntropyLoss()(output, target)
+                backbone_optimizer.zero_grad()
+                output = backbone(data)
+                loss = criterion(output, target)
+                loss.backward()
+                backbone_optimizer.step()
                 
-                event = controller.should_trigger(loss.item())
-                backbone.local_update_all(event)
+                error_signal = controller.should_trigger(loss.item())
+                backbone.local_update_all(error_signal)
                 backbone.clear_activations()
         
-        # Extract features from frozen backbone (all but last layer)
+        # Extract features from frozen backbone (hidden layers only)
         print("\nExtracting features from frozen backbone...")
         
         def extract_features(loader):
@@ -477,9 +498,9 @@ class ExperimentRunner:
                 for data, target in loader:
                     data = data.to(self.config.device)
                     
-                    # Forward through all but last layer
+                    # Forward through hidden layers only
                     x = data
-                    for layer in backbone.layers[:-1]:
+                    for layer in backbone.layers:
                         x = layer(x)
                         x = nn.ReLU()(x)
                     
@@ -496,7 +517,6 @@ class ExperimentRunner:
         feature_dim = train_features.size(1)
         linear_probe = nn.Linear(feature_dim, self.config.output_dim).to(self.config.device)
         optimizer = optim.Adam(linear_probe.parameters(), lr=0.01)
-        criterion = nn.CrossEntropyLoss()
         
         logger = MetricsLogger("linear_probe", self.config.output_dir)
         
@@ -564,7 +584,7 @@ class ExperimentRunner:
         print("LAYER SENSITIVITY: Selective Event Gating")
         print("="*60)
         
-        num_layers = len(self.config.hidden_dims) + 1  # Hidden + output
+        num_layers = len(self.config.hidden_dims)  # Only hidden layers
         
         configurations = {
             "all_layers": [True] * num_layers,
@@ -612,16 +632,24 @@ class ExperimentRunner:
             threshold_factor=self.config.threshold_factor,
         )
         
+        # Create optimizer for output layer
+        optimizer = optim.Adam(
+            model.get_output_params(), lr=self.config.backprop_lr
+        )
+        criterion = nn.CrossEntropyLoss()
+        
         for epoch in range(self.config.epochs):
             for data, target in self.train_loader:
                 data, target = data.to(self.config.device), target.to(self.config.device)
                 
-                with torch.no_grad():
-                    output = model(data)
-                    loss = nn.CrossEntropyLoss()(output, target)
+                optimizer.zero_grad()
+                output = model(data)
+                loss = criterion(output, target)
+                loss.backward()
+                optimizer.step()
                 
-                event = controller.should_trigger(loss.item())
-                model.local_update_all(event)
+                error_signal = controller.should_trigger(loss.item())
+                model.local_update_all(error_signal)
                 model.clear_activations()
         
         results = {}

@@ -179,6 +179,8 @@ def estimate_flops(
     Returns:
         Estimated FLOPs.
     """
+    from .local_layer import LocalLinear, LocalConv2d
+    
     total_flops = 0.0
     
     for module in model.modules():
@@ -187,12 +189,19 @@ def estimate_flops(
             flops = 2 * module.in_features * module.out_features
             total_flops += flops
         
+        elif isinstance(module, LocalLinear):
+            # Same FLOPs as nn.Linear for forward pass
+            flops = 2 * module.in_features * module.out_features
+            total_flops += flops
+        
         elif isinstance(module, (nn.Conv2d,)):
-            # Conv2d: 2 * k^2 * in_channels * out_channels * output_spatial
-            # Simplified estimate assuming output spatial ≈ input spatial / stride
             k = module.kernel_size[0]
             flops = 2 * k * k * module.in_channels * module.out_channels
-            # Multiply by approximate output size (needs actual input to be precise)
+            total_flops += flops
+        
+        elif isinstance(module, LocalConv2d):
+            k = module.kernel_size
+            flops = 2 * k * k * module.in_channels * module.out_channels
             total_flops += flops
     
     if include_backward:

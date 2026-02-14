@@ -1,10 +1,11 @@
 """Local layers with biologically-inspired learning rules.
 
 These layers implement the three-factor learning rule:
-    Δw = η · I(Event) · [Local_Term]
+    Δw = η · error_signal · [Local_Term]
 
-where I(Event) is a global scalar broadcast by the controller,
-and Local_Term uses Oja's normalized Hebbian rule to prevent weight explosion.
+where error_signal is a continuous scalar from the controller
+(normalized surprise), and Local_Term uses Oja's normalized
+Hebbian rule to prevent weight explosion.
 """
 
 import torch
@@ -27,11 +28,17 @@ class LocalLinear(nn.Module):
         out_features: int,
         lr: float = 0.01,
         bias: bool = True,
+        weight_clip: float = 1.0,
+        max_activation: float = 5.0,
+        decay_factor: float = 1.0,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.lr = lr
+        self.weight_clip = weight_clip
+        self.max_activation = max_activation
+        self.decay_factor = decay_factor
         
         # Initialize weights (Xavier uniform)
         self.weight = nn.Parameter(
@@ -75,25 +82,25 @@ class LocalLinear(nn.Module):
             
             return y
     
-    def local_update(self, event: int) -> None:
-        """Apply three-factor learning rule.
+    def local_update(self, event: float) -> None:
+        """Apply three-factor learning rule with continuous error modulation.
         
-        Implements Oja's normalized Hebbian rule:
-            Δw = η · event · (y · x^T - y² · w)
+        Implements error-modulated Oja's rule:
+            Δw = η · error_signal · (y · x^T - decay_factor · y² · w)
         
-        The second term (y² · w) provides normalization to prevent
-        weight explosion without requiring gradient-based methods.
+        The error_signal is a continuous scalar from the event controller,
+        providing both gating AND directional/magnitude error information.
         
         Args:
-            event: Binary signal (0 or 1) from the event controller.
-                   If 0, no update is performed.
+            event: Continuous error signal from the event controller.
+                   0.0 = no update, positive = scale of modulation.
         """
-        if event == 0 or self.x is None or self.y is None:
+        if event == 0.0 or self.x is None or self.y is None:
             return
         
-        # Get stored activations
+        # Get stored activations with clamping for numerical stability
         x = self.x  # (batch, in_features)
-        y = self.y  # (batch, out_features)
+        y = torch.clamp(self.y, -self.max_activation, self.max_activation)  # (batch, out_features)
         
         # Batch-averaged Hebbian term: y · x^T
         # Shape: (out_features, in_features)
@@ -102,10 +109,13 @@ class LocalLinear(nn.Module):
         # Oja's normalization term: y² · w
         # Prevents weight explosion by decorrelating outputs
         y_sq = (y ** 2).mean(dim=0, keepdim=True)  # (1, out_features)
-        decay = y_sq.T * self.weight.data  # (out_features, in_features)
+        decay = self.decay_factor * y_sq.T * self.weight.data  # (out_features, in_features)
         
-        # Three-factor update: Δw = η · event · (hebbian - decay)
+        # Three-factor update: Δw = η · error_signal · (hebbian - decay)
         self.weight.data += self.lr * event * (hebbian - decay)
+        
+        # Weight clipping for numerical stability
+        self.weight.data.clamp_(-self.weight_clip, self.weight_clip)
     
     def clear_activations(self) -> None:
         """Clear stored activations to free memory."""
@@ -131,6 +141,9 @@ class LocalConv2d(nn.Module):
         padding: int = 0,
         lr: float = 0.01,
         bias: bool = True,
+        weight_clip: float = 1.0,
+        max_activation: float = 5.0,
+        decay_factor: float = 1.0,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -139,6 +152,9 @@ class LocalConv2d(nn.Module):
         self.stride = stride
         self.padding = padding
         self.lr = lr
+        self.weight_clip = weight_clip
+        self.max_activation = max_activation
+        self.decay_factor = decay_factor
         
         # Initialize weights
         self.weight = nn.Parameter(
@@ -191,18 +207,22 @@ class LocalConv2d(nn.Module):
             self.y = y.detach()
             return y
     
-    def local_update(self, event: int) -> None:
+    def local_update(self, event: float) -> None:
         """Apply three-factor learning rule for conv layers.
         
-        Uses unfolded input patches for efficient Hebbian update.
+        Uses unfolded input patches for efficient Hebbian update
+        with continuous error signal modulation.
         """
-        if event == 0 or self.x_unfold is None or self.y is None:
+        if event == 0.0 or self.x_unfold is None or self.y is None:
             return
         
         batch_size = self.y.size(0)
         
-        # Reshape y to (batch, out_channels, L)
-        y_flat = self.y.view(batch_size, self.out_channels, -1)
+        # Reshape y to (batch, out_channels, L) with clamping
+        y_flat = torch.clamp(
+            self.y.view(batch_size, self.out_channels, -1),
+            -self.max_activation, self.max_activation
+        )
         
         # x_unfold is (batch, in_channels * k * k, L)
         x_flat = self.x_unfold
@@ -215,11 +235,14 @@ class LocalConv2d(nn.Module):
         # Oja's normalization
         y_sq = (y_flat ** 2).mean(dim=(0, 2), keepdim=True)  # (1, out_channels, 1)
         w_flat = self.weight.view(self.out_channels, -1)  # (out_channels, in_channels * k * k)
-        decay = y_sq.squeeze(0).squeeze(-1).unsqueeze(1) * w_flat
+        decay = self.decay_factor * y_sq.squeeze(0).squeeze(-1).unsqueeze(1) * w_flat
         
-        # Update
+        # Update with continuous error signal
         delta_w = self.lr * event * (hebbian - decay)
         self.weight.data += delta_w.view_as(self.weight)
+        
+        # Weight clipping for numerical stability
+        self.weight.data.clamp_(-self.weight_clip, self.weight_clip)
     
     def clear_activations(self) -> None:
         """Clear stored activations to free memory."""

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from eglp import ExperimentRunner
 from eglp.experiment_runner import ExperimentConfig
-from eglp.visualization import plot_main_results, plot_ablation_results
+from eglp.visualization import plot_main_results, plot_ablation_results, plot_training_curves
 
 
 def parse_args():
@@ -27,6 +27,12 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--output_dir", type=str, default="./results", help="Output directory")
     parser.add_argument("--plot", action="store_true", help="Generate plots after experiments")
+    parser.add_argument(
+        "--hidden_dims", 
+        type=str, 
+        default=None, 
+        help="Hidden dimensions (comma-separated, e.g., '256,128'). If not provided, uses default."
+    )
     
     return parser.parse_args()
 
@@ -34,6 +40,15 @@ def parse_args():
 def main():
     args = parse_args()
     
+    # Parse hidden_dims if provided
+    hidden_dims = None
+    if args.hidden_dims:
+        try:
+            hidden_dims = [int(x) for x in args.hidden_dims.split(",")]
+        except ValueError:
+            print("Error: --hidden_dims must be a comma-separated list of integers")
+            return
+
     # Create config
     config = ExperimentConfig(
         epochs=args.epochs,
@@ -43,6 +58,7 @@ def main():
         event_rate=args.event_rate,
         seed=args.seed,
         output_dir=args.output_dir,
+        hidden_dims=hidden_dims,  # Pass parsed dims
     )
     
     # Create output directory
@@ -95,10 +111,22 @@ def main():
     if args.plot:
         print("\nGenerating plots...")
         try:
-            if "backprop" in results or "eglp_triggered" in results:
-                plot_main_results(results, args.output_dir)
+            # Build a model-specific suffix for filenames to avoid overwriting
+            model_names = "_".join(sorted(results.keys()))
+            
+            # Always try to plot training curves for whatever models were trained
+            plot_training_curves(
+                results, args.output_dir,
+                save_name=f"training_curves_{model_names}.png",
+            )
+            
+            # Specific plots for specific experiments
+            if args.experiment == "all":
+                 plot_main_results(results, args.output_dir)
+
             if "ablation_rate" in results:
                 plot_ablation_results(results["ablation_rate"], args.output_dir)
+                
         except Exception as e:
             print(f"Warning: Could not generate plots: {e}")
     

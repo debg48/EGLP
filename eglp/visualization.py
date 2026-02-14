@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Any
 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 
 
@@ -48,9 +49,10 @@ def plot_main_results(
     for name, logger in results.items():
         if hasattr(logger, 'get_plot_data'):
             data = logger.get_plot_data()
+            epochs_1indexed = [e + 1 for e in data["epochs"]]
             if name in colors:
                 ax1.plot(
-                    data["epochs"], 
+                    epochs_1indexed, 
                     data["val_accuracy"],
                     color=colors[name],
                     label=labels[name],
@@ -65,6 +67,7 @@ def plot_main_results(
     ax1.legend(loc='lower right')
     ax1.grid(True, alpha=0.3)
     ax1.set_ylim([0, 1])
+    ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
     
     # ========================
     # Top-right: Accuracy vs Communication Cost
@@ -147,8 +150,9 @@ def plot_main_results(
     for name, logger in results.items():
         if hasattr(logger, 'get_plot_data') and name in ["eglp_fixed", "eglp_triggered"]:
             data = logger.get_plot_data()
+            epochs_1indexed = [e + 1 for e in data["epochs"]]
             ax4.plot(
-                data["epochs"],
+                epochs_1indexed,
                 data["events_triggered"],
                 color=colors[name],
                 label=labels[name],
@@ -162,6 +166,7 @@ def plot_main_results(
     ax4.set_title("Event Distribution Over Training", fontsize=14, fontweight='bold')
     ax4.legend()
     ax4.grid(True, alpha=0.3)
+    ax4.xaxis.set_major_locator(MaxNLocator(integer=True))
     
     # Save
     output_path = Path(output_dir) / save_name
@@ -283,3 +288,65 @@ def plot_robustness(
     fig.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"Robustness plot saved to {output_path}")
+
+
+def plot_training_curves(
+    results: Dict[str, Any],
+    output_dir: str = "./results",
+    save_name: str = "training_curves.png",
+) -> None:
+    """Generic function to plot training curves for any set of experiments."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Color scheme generator
+    prop_cycle = plt.rcParams['axes.prop_cycle']
+    colors = prop_cycle.by_key()['color']
+    
+    for i, (name, logger) in enumerate(results.items()):
+        if hasattr(logger, 'get_plot_data'):
+            data = logger.get_plot_data()
+            epochs_1indexed = [e + 1 for e in data["epochs"]]
+            color = colors[i % len(colors)]
+            
+            # Accuracy
+            ax1.plot(
+                epochs_1indexed, 
+                data["val_accuracy"],
+                label=name,
+                linewidth=2,
+                marker='o',
+                markersize=4,
+                color=color
+            )
+            
+            # Loss
+            ax2.plot(
+                epochs_1indexed,
+                data["train_loss"], # Using train loss as val loss might be infrequent/noisy
+                label=name,
+                linewidth=2,
+                linestyle='--',
+                color=color
+            )
+
+    # Styling
+    ax1.set_xlabel("Epoch", fontsize=12)
+    ax1.set_ylabel("Validation Accuracy", fontsize=12)
+    ax1.set_title("Validation Accuracy", fontsize=14, fontweight='bold')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.set_ylim([0, 1.05])
+    ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
+    
+    ax2.set_xlabel("Epoch", fontsize=12)
+    ax2.set_ylabel("Training Loss", fontsize=12)
+    ax2.set_title("Training Loss", fontsize=14, fontweight='bold')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
+    
+    plt.tight_layout()
+    output_path = Path(output_dir) / save_name
+    fig.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Training curves saved to {output_path}")

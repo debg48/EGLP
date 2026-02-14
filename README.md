@@ -54,12 +54,13 @@ python main.py --experiment <EXPERIMENT_NAME> [OPTIONS]
 | `--experiment` | `str` | `all` | The experiment to run. Options: `all`, `backprop`, `pure_local`, `eglp_fixed`, `eglp_triggered`, `ablation_rate`, `linear_probe`, `layer_sensitivity`, `robustness`. |
 | `--epochs` | `int` | `20` | Number of training epochs. |
 | `--batch_size` | `int` | `128` | Batch size for training and evaluation. |
-| `--local_lr` | `float` | `0.01` | Learning rate for local updates. |
+| `--local_lr` | `float` | `0.0001` | Learning rate for local updates. |
 | `--event_budget` | `int` | `1000` | Maximum number of events for the `ThresholdController`. |
-| `--event_rate` | `float` | `0.1` | Probability of an event for `FixedRateController`. |
+| `--event_rate` | `float` | `0.05` | Probability of an event for `FixedRateController`. |
 | `--seed` | `int` | `42` | Random seed for reproducibility. |
 | `--output_dir` | `str` | `./results`| Directory to save logs, metrics, and plots. |
 | `--plot` | `flag` | `False` | If set, generates plots automatically after experiments complete. |
+| `--threshold_factor` | `float` | `2.0` | Multiplier for mean loss to set dynamic threshold. |
 
 ## 🧪 Reproducible Experiments
 
@@ -71,14 +72,27 @@ To compare EGLP against baselines (Backprop and Pure Hebbian):
 # Run standard backpropagation baseline
 python main.py --experiment backprop --epochs 20
 
-# Run pure local learning (events always on)
+# Run pure local learning (events always on) - Lower Bound
 python main.py --experiment pure_local --epochs 20
 
-# Run EGLP with triggered events (dynamic thresholding)
-python main.py --experiment eglp_triggered --epochs 20 --event_budget 1000
+# Run EGLP with triggered events (dynamic thresholding) - Main Method
+python main.py --experiment eglp_triggered --epochs 20 --event_budget 1000 --threshold_factor 2.0
+
 ```
 
-### 2. Ablation Study: Event Rate
+### 2. Fair Comparison (Constrained Architecture)
+
+To compare EGLP against Backprop in a regime where Backprop doesn't trivially solve the task (accuracy ~70-80%), use the restricted architecture with **3 hidden neurons**:
+
+```bash
+# Standard Backprop Baseline (Restricted)
+python3 main.py --experiment backprop --hidden_dims "3" --epochs 20 --plot
+
+# EGLP with Threshold Triggering (Restricted)
+python3 main.py --experiment eglp_triggered --hidden_dims "3" --epochs 20 --plot
+```
+
+### 3. Ablation Study: Event Rate
 
 Analyze the trade-off between communication cost (event rate) and accuracy. This sweeps event rates $\epsilon \in [0, 1]$.
 
@@ -127,5 +141,3 @@ EGLP/
 ## 📝 Citation
 
 If you use this code in your research, please cite:
-
-
