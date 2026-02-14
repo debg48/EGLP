@@ -19,14 +19,21 @@ import torchvision
 import torchvision.transforms as transforms
 
 from .local_layer import LocalLinear
+from .network import EGLPNetwork, create_mlp, create_cnn
 from .event_controller import (
     EventController, 
     ThresholdController, 
-    FixedRateController,
+    FixedRateController, 
     AlwaysOnController,
+    NeverController
 )
-from .network import EGLPNetwork, create_mlp
-from .metrics import MetricsLogger, EpochMetrics, compute_cka, estimate_flops
+from .metrics import (
+    MetricsLogger, 
+    EpochMetrics, 
+    compute_cka, 
+    estimate_flops,
+    compute_classification_metrics
+)
 
 
 @dataclass
@@ -144,12 +151,12 @@ class ExperimentRunner:
         model: nn.Module, 
         loader: DataLoader,
         is_eglp: bool = False,
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, Dict[str, float]]:
         """Evaluate model accuracy and loss."""
         model.eval()
         total_loss = 0.0
-        correct = 0
-        total = 0
+        all_preds = []
+        all_targets = []
         
         criterion = nn.CrossEntropyLoss()
         
@@ -163,10 +170,12 @@ class ExperimentRunner:
                 total_loss += loss.item() * data.size(0)
                 
                 _, predicted = output.max(1)
-                correct += predicted.eq(target).sum().item()
-                total += target.size(0)
+                all_preds.extend(predicted.cpu().numpy().tolist())
+                all_targets.extend(target.cpu().numpy().tolist())
         
-        return total_loss / total, correct / total
+        metrics = compute_classification_metrics(all_targets, all_preds)
+        
+        return total_loss / len(loader.dataset), metrics
     
     # ========================
     # BASELINE: Standard Backprop
@@ -205,7 +214,7 @@ class ExperimentRunner:
             
             train_loss = epoch_loss / total
             train_acc = correct / total
-            val_loss, val_acc = self._evaluate(model, self.val_loader)
+            val_loss, val_metrics = self._evaluate(model, self.val_loader)
             
             # Estimate FLOPs (include backward for backprop)
             flops = estimate_flops(model, (self.config.input_dim,), include_backward=True)
@@ -216,7 +225,10 @@ class ExperimentRunner:
                 train_loss=train_loss,
                 train_accuracy=train_acc,
                 val_loss=val_loss,
-                val_accuracy=val_acc,
+                val_accuracy=val_metrics["accuracy"],
+                val_precision=val_metrics["precision"],
+                val_recall=val_metrics["recall"],
+                val_f1=val_metrics["f1"],
                 events_triggered=0,  # N/A for backprop
                 flops_estimate=flops,
             ))
@@ -371,7 +383,7 @@ class ExperimentRunner:
             
             train_loss = epoch_loss / total
             train_acc = correct / total
-            val_loss, val_acc = self._evaluate(model, self.val_loader, is_eglp=True)
+            val_loss, val_metrics = self._evaluate(model, self.val_loader, is_eglp=True)
             
             # Compute CKA with backprop representations
             cka_scores = {}
@@ -394,7 +406,10 @@ class ExperimentRunner:
                 train_loss=train_loss,
                 train_accuracy=train_acc,
                 val_loss=val_loss,
-                val_accuracy=val_acc,
+                val_accuracy=val_metrics["accuracy"],
+                val_precision=val_metrics["precision"],
+                val_recall=val_metrics["recall"],
+                val_f1=val_metrics["f1"],
                 events_triggered=epoch_events,
                 flops_estimate=flops,
                 cka_scores=cka_scores,

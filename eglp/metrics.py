@@ -7,6 +7,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from sklearn.metrics import precision_recall_fscore_support, accuracy_score
 
 
 @dataclass
@@ -17,6 +18,9 @@ class EpochMetrics:
     train_accuracy: float
     val_loss: Optional[float] = None
     val_accuracy: Optional[float] = None
+    val_precision: Optional[float] = None
+    val_recall: Optional[float] = None
+    val_f1: Optional[float] = None
     events_triggered: int = 0
     flops_estimate: float = 0.0
     cka_scores: Dict[int, float] = field(default_factory=dict)
@@ -84,11 +88,40 @@ class MetricsLogger:
             "train_accuracy": [e.train_accuracy for e in self.epochs],
             "val_loss": [e.val_loss for e in self.epochs],
             "val_accuracy": [e.val_accuracy for e in self.epochs],
+            "val_f1": [e.val_f1 if e.val_f1 is not None else 0.0 for e in self.epochs],
+            "val_precision": [e.val_precision if e.val_precision is not None else 0.0 for e in self.epochs],
+            "val_recall": [e.val_recall if e.val_recall is not None else 0.0 for e in self.epochs],
             "events_triggered": [e.events_triggered for e in self.epochs],
             "cumulative_events": list(
                 torch.cumsum(torch.tensor([e.events_triggered for e in self.epochs]), 0).tolist()
             ),
         }
+
+
+def compute_classification_metrics(
+    y_true: List[int],
+    y_pred: List[int],
+) -> Dict[str, float]:
+    """Compute standard classification metrics using sklearn.
+    
+    Args:
+        y_true: Ground truth labels.
+        y_pred: Predicted labels.
+        
+    Returns:
+        Dictionary with accuracy, precision (macro), recall (macro), f1 (macro).
+    """
+    accuracy = accuracy_score(y_true, y_pred)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average='macro', zero_division=0
+    )
+    
+    return {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
 
 
 def compute_cka(
