@@ -187,6 +187,7 @@ class ExperimentRunner:
         print("BASELINE: Standard Backprop")
         print("="*60)
         
+        self._set_seed(self.config.seed)
         model = self._create_backprop_network()
         optimizer = optim.Adam(model.parameters(), lr=self.config.backprop_lr)
         criterion = nn.CrossEntropyLoss()
@@ -283,6 +284,7 @@ class ExperimentRunner:
         print("BASELINE: Pure Local (Hebbian)")
         print("="*60)
         
+        self._set_seed(self.config.seed)
         model = self._create_eglp_network()
         controller = AlwaysOnController()
         logger = MetricsLogger("pure_local", self.config.output_dir)
@@ -301,6 +303,7 @@ class ExperimentRunner:
         print(f"EGLP-Fixed (rate={rate})")
         print("="*60)
         
+        self._set_seed(self.config.seed)
         model = self._create_eglp_network()
         controller = FixedRateController(rate=rate, seed=self.config.seed)
         logger = MetricsLogger(f"eglp_fixed_{rate}", self.config.output_dir)
@@ -317,6 +320,7 @@ class ExperimentRunner:
         print("EGLP-Triggered (ThresholdController)")
         print("="*60)
         
+        self._set_seed(self.config.seed)
         model = self._create_eglp_network()
         controller = ThresholdController(
             budget=self.config.event_budget,
@@ -475,6 +479,7 @@ class ExperimentRunner:
         print("="*60)
         
         # First train EGLP backbone
+        self._set_seed(self.config.seed)
         backbone = self._create_eglp_network()
         controller = ThresholdController(
             budget=self.config.event_budget,
@@ -641,6 +646,7 @@ class ExperimentRunner:
         
         # Train model on clean data
         print("Training on clean MNIST...")
+        self._set_seed(self.config.seed)
         model = self._create_eglp_network()
         controller = ThresholdController(
             budget=self.config.event_budget,
