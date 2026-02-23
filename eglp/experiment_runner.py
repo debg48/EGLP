@@ -19,7 +19,7 @@ import torchvision
 import torchvision.transforms as transforms
 
 from .local_layer import LocalLinear
-from .network import EGLPNetwork, create_mlp, create_cnn
+from .network import EGLPNetwork, create_mlp, create_cnn, FrozenBatchNorm1d, create_predictive_mlp, AdaptiveEGLPNetwork
 from .event_controller import (
     EventController, 
     ThresholdController, 
@@ -50,13 +50,33 @@ class ExperimentConfig:
     
     # Training
     epochs: int = 20
-    local_lr: float = 0.0001
+    local_lr: float = 1e-5
     backprop_lr: float = 0.001
     
     # EGLP
     event_budget: int = 1000
     event_rate: float = 0.05
     threshold_factor: float = 2.0
+    max_signal: float = 1.0
+    
+    # EGLP enhancements
+    use_anti_hebbian: bool = False
+    use_batchnorm: bool = False
+    use_consolidation: bool = False
+    consolidation_strength: float = 0.01
+    use_homeostasis: bool = False
+    homeostasis_interval: int = 50  # Apply every N batches
+    cosine_lr: bool = False
+    cosine_lr_max: float = 5e-4
+    cosine_lr_min: float = 1e-5
+    soft_wta_k: float = 0.0  # 0 = disabled, e.g. 0.3 = keep top 30%
+    event_decay: float = 1.0  # Depth decay γ, 1.0 = no decay
+    
+    # EGLP enhancements
+    gamma_lr: float = 0.01
+    inhib_lr: float = 0.01
+    feedback_lr: float = 0.01
+    inhib_steps: int = 2
     
     # Misc
     seed: int = 42
@@ -64,6 +84,27 @@ class ExperimentConfig:
     output_dir: str = "./results"
     
     def __post_init__(self):
+        # Auto-configure based on dataset if not explicitly overridden
+        if self.dataset.lower() == "cifar10":
+            if self.input_dim == 784:  # Check if still default
+                self.input_dim = 3072
+            
+            # CIFAR-10 Best Practice: Deep Pyramidal MLP
+            # [Input(3072) -> 3072 -> 2048 -> 1024 -> 512 -> Output(10)]
+            # This depth allows for hierarchical feature formation that shallow networks miss.
+            if self.hidden_dims is None:
+                self.hidden_dims = [3072, 2048, 1024, 512]
+            
+            # Ensure SoftWTA is active for CIFAR if not manually set
+            if self.soft_wta_k == 0.0:
+                 self.soft_wta_k = 0.4
+                 
+        elif self.dataset.lower() == "mnist":
+            # MNIST Best Known Configuration: [256, 128] (Default is fine, but explicit)
+            if self.hidden_dims is None:
+                self.hidden_dims = [256, 128]
+        
+        # Fallback for other potential datasets
         if self.hidden_dims is None:
             self.hidden_dims = [256, 128]
 
@@ -90,18 +131,35 @@ class ExperimentRunner:
     
     def _load_data(self) -> Tuple[DataLoader, DataLoader, DataLoader]:
         """Load MNIST dataset."""
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,)),
-            transforms.Lambda(lambda x: x.view(-1)),  # Flatten
-        ])
-        
-        train_dataset = torchvision.datasets.MNIST(
-            root="./data", train=True, download=True, transform=transform
-        )
-        test_dataset = torchvision.datasets.MNIST(
-            root="./data", train=False, download=True, transform=transform
-        )
+        if self.config.dataset.lower() == "mnist":
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.1307,), (0.3081,)),
+                transforms.Lambda(lambda x: x.view(-1)),  # Flatten
+            ])
+            train_dataset = torchvision.datasets.MNIST(
+                root="./data", train=True, download=True, transform=transform
+            )
+            test_dataset = torchvision.datasets.MNIST(
+                root="./data", train=False, download=True, transform=transform
+            )
+            # update input dim if default
+            if self.config.input_dim == 784 and self.config.dataset.lower() != "mnist":
+                 pass # Should handled by config init, but just in case
+        elif self.config.dataset.lower() == "cifar10":
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                transforms.Lambda(lambda x: x.view(-1)),  # Flatten 32*32*3
+            ])
+            train_dataset = torchvision.datasets.CIFAR10(
+                root="./data", train=True, download=True, transform=transform
+            )
+            test_dataset = torchvision.datasets.CIFAR10(
+                root="./data", train=False, download=True, transform=transform
+            )
+        else:
+            raise ValueError(f"Unknown dataset: {self.config.dataset}")
         
         # Split train into train/val
         train_size = int(0.9 * len(train_dataset))
@@ -136,13 +194,51 @@ class ExperimentRunner:
         
         return nn.Sequential(*layers).to(self.config.device)
     
-    def _create_eglp_network(self) -> EGLPNetwork:
-        """Create EGLP network with local layers."""
+    def _create_eglp_basic_network(self) -> EGLPNetwork:
+        """Create basic EGLP network with local layers (no enhancements)."""
         network = create_mlp(
             input_dim=self.config.input_dim,
             hidden_dims=self.config.hidden_dims,
             output_dim=self.config.output_dim,
             lr=self.config.local_lr,
+        )
+        return network.to(self.config.device)
+    
+    def _create_eglp_network(self) -> EGLPNetwork:
+        """Create enhanced EGLP network with all improvements."""
+        network = create_mlp(
+            input_dim=self.config.input_dim,
+            hidden_dims=self.config.hidden_dims,
+            output_dim=self.config.output_dim,
+            lr=self.config.local_lr,
+            use_anti_hebbian=self.config.use_anti_hebbian,
+            consolidation_strength=(
+                self.config.consolidation_strength if self.config.use_consolidation else 0.0
+            ),
+            use_batchnorm=self.config.use_batchnorm,
+            soft_wta_k=self.config.soft_wta_k if self.config.soft_wta_k > 0 else None,
+            event_decay=self.config.event_decay,
+        )
+        return network.to(self.config.device)
+
+    def _create_eglp_v2_network(self) -> AdaptiveEGLPNetwork:
+        """Create EGLP-V2 network with Predictive Coding and Adaptive Feedback."""
+        network = create_predictive_mlp(
+            input_dim=self.config.input_dim,
+            hidden_dims=self.config.hidden_dims,
+            output_dim=self.config.output_dim,
+            lr=self.config.local_lr,
+            gamma_lr=self.config.gamma_lr,
+            inhib_lr=self.config.inhib_lr,
+            feedback_lr=self.config.feedback_lr,
+            inhib_steps=self.config.inhib_steps,
+            event_decay=self.config.event_decay,
+            use_anti_hebbian=self.config.use_anti_hebbian,
+            consolidation_strength=(
+                self.config.consolidation_strength if self.config.use_consolidation else 0.0
+            ),
+            use_batchnorm=self.config.use_batchnorm,
+            soft_wta_k=self.config.soft_wta_k if self.config.soft_wta_k > 0 else None,
         )
         return network.to(self.config.device)
     
@@ -176,6 +272,24 @@ class ExperimentRunner:
         metrics = compute_classification_metrics(all_targets, all_preds)
         
         return total_loss / len(loader.dataset), metrics
+    
+    def _evaluate_and_store_test(
+        self,
+        model: nn.Module,
+        logger: MetricsLogger,
+        name: str,
+        is_eglp: bool = False,
+    ) -> None:
+        """Run dedicated test-set evaluation and store results."""
+        test_loss, test_metrics = self._evaluate(model, self.test_loader, is_eglp=is_eglp)
+        logger.set_test_metrics(test_metrics)
+        
+        print(f"\n--- Test Results for {name} ---")
+        print(f"  Accuracy:  {test_metrics['accuracy']:.4f}")
+        print(f"  Precision: {test_metrics['precision']:.4f}")
+        print(f"  Recall:    {test_metrics['recall']:.4f}")
+        print(f"  F1:        {test_metrics['f1']:.4f}")
+        print(f"-------------------------------\n")
     
     # ========================
     # BASELINE: Standard Backprop
@@ -234,11 +348,15 @@ class ExperimentRunner:
                 flops_estimate=flops,
             ))
             
+            val_acc = val_metrics["accuracy"]
             print(f"Epoch {epoch+1}/{self.config.epochs} | "
                   f"Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}")
         
         # Store representations for CKA comparison
         self._store_backprop_representations(model)
+        
+        # Dedicated test-set evaluation
+        self._evaluate_and_store_test(model, logger, "Backprop Baseline", is_eglp=False)
         
         logger.save()
         return logger
@@ -285,8 +403,8 @@ class ExperimentRunner:
         print("="*60)
         
         self._set_seed(self.config.seed)
-        model = self._create_eglp_network()
-        controller = AlwaysOnController()
+        model = self._create_eglp_basic_network()
+        controller = AlwaysOnController(max_signal=self.config.max_signal)
         logger = MetricsLogger("pure_local", self.config.output_dir)
         
         return self._run_eglp_training(model, controller, logger, "Pure Local")
@@ -304,8 +422,12 @@ class ExperimentRunner:
         print("="*60)
         
         self._set_seed(self.config.seed)
-        model = self._create_eglp_network()
-        controller = FixedRateController(rate=rate, seed=self.config.seed)
+        model = self._create_eglp_basic_network()
+        controller = FixedRateController(
+            rate=rate, 
+            seed=self.config.seed,
+            max_signal=self.config.max_signal
+        )
         logger = MetricsLogger(f"eglp_fixed_{rate}", self.config.output_dir)
         
         return self._run_eglp_training(model, controller, logger, f"EGLP-Fixed({rate})")
@@ -321,14 +443,107 @@ class ExperimentRunner:
         print("="*60)
         
         self._set_seed(self.config.seed)
-        model = self._create_eglp_network()
+        model = self._create_eglp_basic_network()
         controller = ThresholdController(
             budget=self.config.event_budget,
             threshold_factor=self.config.threshold_factor,
+            max_signal=self.config.max_signal,
         )
         logger = MetricsLogger("eglp_triggered", self.config.output_dir)
         
         return self._run_eglp_training(model, controller, logger, "EGLP-Triggered")
+    
+    # ========================
+    # EGLP Baseline: Enhanced with all original heuristics (No PC/AFA)
+    # ========================
+    
+    def run_eglp(self) -> MetricsLogger:
+        """Run EGLP Baseline with heuristic enhancements.
+        
+        Combines:
+        - Anti-Hebbian diversity (alternating layers)
+        - Synaptic consolidation (EWC-lite)
+        - Homeostatic scaling (dead neuron recovery)
+        - Cosine LR schedule
+        - Frozen BatchNorm
+        - Soft-WTA activation (optional)
+        - Depth-dependent event decay
+        - Higher event rate and max_signal
+        """
+        print("\n" + "="*60)
+        print("EGLP Baseline (Heuristic Enhancements)")
+        print(f"  Architecture: {self.config.hidden_dims}")
+        print(f"  Anti-Hebbian: {self.config.use_anti_hebbian}")
+        print(f"  BatchNorm: {self.config.use_batchnorm}")
+        print(f"  Consolidation: {self.config.use_consolidation}")
+        print(f"  Homeostasis: {self.config.use_homeostasis}")
+        print(f"  Cosine LR: {self.config.cosine_lr}")
+        print(f"  Soft-WTA k: {self.config.soft_wta_k}")
+        print(f"  Event decay γ: {self.config.event_decay}")
+        print(f"  Event rate: {self.config.event_rate}")
+        print("="*60)
+        
+        self._set_seed(self.config.seed)
+        model = self._create_eglp_network()
+        
+        # Warmup BatchNorm if enabled
+        if self.config.use_batchnorm:
+            print("Running BatchNorm warmup pass...")
+            model.warmup_batchnorms(self.train_loader, self.config.device)
+        
+        controller = ThresholdController(
+            budget=self.config.event_budget,
+            threshold_factor=self.config.threshold_factor,
+            max_signal=self.config.max_signal,
+        )
+        logger = MetricsLogger("eglp_baseline", self.config.output_dir)
+        
+        return self._run_eglp_training(
+            model, controller, logger, "EGLP Baseline",
+            use_cosine_lr=self.config.cosine_lr,
+            use_homeostasis=self.config.use_homeostasis,
+            use_consolidation=self.config.use_consolidation,
+        )
+
+    # ========================
+    # EGLP: Predictive Coding & Adaptive Feedback
+    # ========================
+    
+    def run_eglp_v2(self) -> MetricsLogger:
+        """Run EGLP with Predictive Coding, Adaptive Feedback, and Learned Inhibition."""
+        print("\n" + "="*60)
+        print("EGLP (Predictive + Adaptive Feedback + Inhibition)")
+        print(f"  Architecture: {self.config.hidden_dims}")
+        print(f"  Gamma LR: {self.config.gamma_lr}")
+        print(f"  Inhib LR: {self.config.inhib_lr}")
+        print(f"  Feedback LR: {self.config.feedback_lr}")
+        print(f"  Anti-Hebbian: {self.config.use_anti_hebbian}")
+        print(f"  BatchNorm: {self.config.use_batchnorm}")
+        print(f"  Consolidation: {self.config.use_consolidation}")
+        print(f"  Soft-WTA k: {self.config.soft_wta_k}")
+        print("="*60)
+        
+        self._set_seed(self.config.seed)
+        model = self._create_eglp_v2_network()
+        
+        # Warmup BatchNorm if enabled
+        if self.config.use_batchnorm:
+            print("Running BatchNorm warmup pass...")
+            model.warmup_batchnorms(self.train_loader, self.config.device)
+        
+        controller = ThresholdController(
+            budget=self.config.event_budget,
+            threshold_factor=self.config.threshold_factor,
+            max_signal=self.config.max_signal,
+        )
+        logger = MetricsLogger("eglp", self.config.output_dir)
+        
+        return self._run_eglp_training(
+            model, controller, logger, "EGLP",
+            use_cosine_lr=self.config.cosine_lr,
+            use_homeostasis=self.config.use_homeostasis,
+            use_consolidation=self.config.use_consolidation,
+        )
     
     def _run_eglp_training(
         self,
@@ -336,19 +551,37 @@ class ExperimentRunner:
         controller: EventController,
         logger: MetricsLogger,
         name: str,
+        use_cosine_lr: bool = False,
+        use_homeostasis: bool = False,
+        use_consolidation: bool = False,
+        train_output: bool = True,
+        train_hidden: bool = True,
     ) -> MetricsLogger:
         """Core EGLP hybrid training loop.
         
         Hidden layers: local Hebbian updates modulated by error signal
         Output layer: supervised backprop (only 1 layer, minimal communication)
+        
+        EGLP additions:
+        - Cosine LR schedule for local learning rate
+        - Periodic homeostatic scaling
+        - Synaptic consolidation snapshots at epoch boundaries
         """
+        import math
+        
         criterion = nn.CrossEntropyLoss()
         
         # Optimizer for output layer ONLY
-        optimizer = optim.Adam(
-            model.get_output_params(), 
-            lr=self.config.backprop_lr,
-        )
+        if train_output:
+            optimizer = optim.Adam(
+                model.get_output_params(), 
+                lr=self.config.backprop_lr,
+            )
+        else:
+            optimizer = None
+        
+        # Store base LR for cosine schedule
+        base_lr = self.config.local_lr
         
         for epoch in range(self.config.epochs):
             model.train()
@@ -356,28 +589,52 @@ class ExperimentRunner:
             correct = 0
             total = 0
             epoch_events = 0
+            batch_count = 0
+            
+            # --- Cosine LR schedule: update local_lr per epoch ---
+            if use_cosine_lr:
+                lr_max = self.config.cosine_lr_max
+                lr_min = self.config.cosine_lr_min
+                T = self.config.epochs
+                current_lr = lr_min + 0.5 * (lr_max - lr_min) * (
+                    1 + math.cos(epoch * math.pi / T)
+                )
+                # Update LR in all hidden layers
+                for layer in model.layers:
+                    if hasattr(layer, 'lr'):
+                        layer.lr = current_lr
             
             for data, target in self.train_loader:
                 data, target = data.to(self.config.device), target.to(self.config.device)
+                batch_count += 1
                 
                 # Forward pass: hidden layers (no grad) + output layer (grad)
-                optimizer.zero_grad()
+                if optimizer:
+                    optimizer.zero_grad()
                 output = model(data, store_representations=(epoch == self.config.epochs - 1))
                 
                 # Compute loss with gradients for output layer
                 loss = criterion(output, target)
                 
                 # Backprop ONLY the output layer
-                loss.backward()
-                optimizer.step()
+                if train_output:
+                    loss.backward()
+                    optimizer.step()
                 
                 # Controller decides event signal (continuous float)
-                error_signal = controller.should_trigger(loss.item())
-                epoch_events += (1 if error_signal > 0 else 0)
+                if train_hidden:
+                    error_signal = controller.should_trigger(loss.item())
+                    epoch_events += (1 if error_signal > 0 else 0)
+                    
+                    # Local update for hidden layers with error modulation
+                    model.local_update_all(error_signal, logits=output, target=target)
+                    model.clear_activations()
+                else:
+                    error_signal = 0.0
                 
-                # Local update for hidden layers with error modulation
-                model.local_update_all(error_signal)
-                model.clear_activations()
+                # --- Homeostatic scaling every N batches ---
+                if use_homeostasis and batch_count % self.config.homeostasis_interval == 0:
+                    model.homeostatic_scale_all()
                 
                 # Metrics
                 epoch_loss += loss.item() * data.size(0)
@@ -385,9 +642,14 @@ class ExperimentRunner:
                 correct += predicted.eq(target).sum().item()
                 total += target.size(0)
             
+            # --- Synaptic consolidation: snapshot weights at epoch boundary ---
+            if use_consolidation:
+                model.snapshot_all_weights()
+            
             train_loss = epoch_loss / total
             train_acc = correct / total
             val_loss, val_metrics = self._evaluate(model, self.val_loader, is_eglp=True)
+            val_acc = val_metrics["accuracy"]
             
             # Compute CKA with backprop representations
             cka_scores = {}
@@ -405,6 +667,11 @@ class ExperimentRunner:
             flops = estimate_flops(model, (self.config.input_dim,), include_backward=False)
             flops *= len(self.train_loader)
             
+            # Log current LR if cosine schedule is active
+            lr_info = ""
+            if use_cosine_lr:
+                lr_info = f" | LR: {current_lr:.6f}"
+            
             logger.log_epoch(EpochMetrics(
                 epoch=epoch,
                 train_loss=train_loss,
@@ -421,7 +688,16 @@ class ExperimentRunner:
             
             print(f"Epoch {epoch+1}/{self.config.epochs} | "
                   f"Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f} | "
-                  f"Events: {epoch_events}")
+                  f"Events: {epoch_events}{lr_info}")
+        
+        # Restore base LR after training (in case of cosine schedule)
+        if use_cosine_lr:
+            for layer in model.layers:
+                if hasattr(layer, 'lr'):
+                    layer.lr = base_lr
+        
+        # Dedicated test-set evaluation
+        self._evaluate_and_store_test(model, logger, name, is_eglp=True)
         
         logger.save()
         return logger
@@ -454,8 +730,12 @@ class ExperimentRunner:
             print(f"\nTesting rate = {rate}")
             self._set_seed(self.config.seed)  # Reset seed for fair comparison
             
-            model = self._create_eglp_network()
-            controller = FixedRateController(rate=rate, seed=self.config.seed)
+            model = self._create_eglp_basic_network()
+            controller = FixedRateController(
+                rate=rate, 
+                seed=self.config.seed,
+                max_signal=self.config.max_signal
+            )
             logger = MetricsLogger(f"ablation_rate_{rate}", self.config.output_dir)
             
             self._run_eglp_training(model, controller, logger, f"Rate={rate}")
@@ -480,10 +760,11 @@ class ExperimentRunner:
         
         # First train EGLP backbone
         self._set_seed(self.config.seed)
-        backbone = self._create_eglp_network()
+        backbone = self._create_eglp_basic_network()
         controller = ThresholdController(
             budget=self.config.event_budget,
             threshold_factor=self.config.threshold_factor,
+            max_signal=self.config.max_signal,
         )
         
         # Optimizer for output layer during backbone training
@@ -507,7 +788,12 @@ class ExperimentRunner:
                 backbone.local_update_all(error_signal)
                 backbone.clear_activations()
         
-        # Extract features from frozen backbone (hidden layers only)
+        # Extract features and train probe
+        probe_logger = self._run_linear_probe_on_model(backbone)
+        return probe_logger
+        
+    def _run_linear_probe_on_model(self, model: nn.Module) -> MetricsLogger:
+        """Trains a linear probe on the frozen representations of a model."""
         print("\nExtracting features from frozen backbone...")
         
         def extract_features(loader):
@@ -518,9 +804,8 @@ class ExperimentRunner:
                 for data, target in loader:
                     data = data.to(self.config.device)
                     
-                    # Forward through hidden layers only
                     x = data
-                    for layer in backbone.layers:
+                    for layer in model.layers:
                         x = layer(x)
                         x = nn.ReLU()(x)
                     
@@ -531,19 +816,19 @@ class ExperimentRunner:
         
         train_features, train_labels = extract_features(self.train_loader)
         val_features, val_labels = extract_features(self.val_loader)
+        test_features, test_labels = extract_features(self.test_loader)
         
-        # Train linear probe
         print("Training linear probe...")
         feature_dim = train_features.size(1)
         linear_probe = nn.Linear(feature_dim, self.config.output_dim).to(self.config.device)
         optimizer = optim.Adam(linear_probe.parameters(), lr=0.01)
+        criterion = nn.CrossEntropyLoss()
         
         logger = MetricsLogger("linear_probe", self.config.output_dir)
-        
         train_dataset = torch.utils.data.TensorDataset(train_features, train_labels)
         probe_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
         
-        for epoch in range(10):  # Fewer epochs for linear probe
+        for epoch in range(10):  # Probe trains fast
             linear_probe.train()
             epoch_loss = 0.0
             correct = 0
@@ -579,18 +864,130 @@ class ExperimentRunner:
                 val_acc = predicted.eq(val_labels_dev).float().mean().item()
             
             logger.log_epoch(EpochMetrics(
-                epoch=epoch,
-                train_loss=train_loss,
-                train_accuracy=train_acc,
-                val_loss=val_loss,
-                val_accuracy=val_acc,
+                epoch=epoch, train_loss=train_loss, train_accuracy=train_acc,
+                val_loss=val_loss, val_accuracy=val_acc,
             ))
             
-            print(f"Probe Epoch {epoch+1}/10 | "
-                  f"Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}")
+            print(f"Probe Epoch {epoch+1}/10 | Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}")
+            
+        # Run final test set
+        linear_probe.eval()
+        test_features_dev = test_features.to(self.config.device)
+        test_labels_dev = test_labels.to(self.config.device)
+        with torch.no_grad():
+            test_output = linear_probe(test_features_dev)
+            _, predicted = test_output.max(1)
+            test_acc = predicted.eq(test_labels_dev).float().mean().item()
+            
+        logger.set_test_metrics({"accuracy": test_acc, "precision": 0.0, "recall": 0.0, "f1": 0.0})
+        print(f"--- Linear Probe Final Test Acc: {test_acc:.4f} ---")
         
         logger.save()
         return logger
+
+    # ========================
+    # DIAGNOSTICS: Hypothesis Validation
+    # ========================
+
+    def run_zero_event(self) -> MetricsLogger:
+        """Run EGLP with a hardcoded zero-event controller to prove importance of error signal."""
+        print("\n" + "="*60)
+        print("DIAGNOSTIC: Hard Zero Event (NeverController)")
+        print("="*60)
+        self._set_seed(self.config.seed)
+        model = self._create_eglp_network()
+        controller = NeverController()
+        logger = MetricsLogger("diagnostic_zero_event", self.config.output_dir)
+        return self._run_eglp_training(
+            model, controller, logger, "Zero Event",
+            use_cosine_lr=self.config.cosine_lr,
+            use_homeostasis=self.config.use_homeostasis,
+            use_consolidation=self.config.use_consolidation,
+            train_output=True,
+            train_hidden=True, # Will result in 0 updates due to NeverController
+        )
+
+    def run_unsupervised_pretraining(self) -> MetricsLogger:
+        """Fully unsupervised Hebbian pretraining of hidden features, followed by linear probe."""
+        print("\n" + "="*60)
+        print("DIAGNOSTIC: Unsupervised Pretraining + Linear Probe")
+        print("="*60)
+        self._set_seed(self.config.seed)
+        model = self._create_eglp_network()
+        controller = AlwaysOnController()
+        logger = MetricsLogger("diagnostic_unsupervised", self.config.output_dir)
+        
+        print("Phase 1/2: Pure Hebbian Pretraining (no labels)...")
+        self._run_eglp_training(
+            model, controller, logger, "Unsupervised Pretrain",
+            use_cosine_lr=self.config.cosine_lr,
+            use_homeostasis=self.config.use_homeostasis,
+            use_consolidation=self.config.use_consolidation,
+            train_output=False, # Crucial: no backprop on classifier
+            train_hidden=True,
+        )
+        
+        print("Phase 2/2: Training Linear Probe on frozen features...")
+        probe_logger = self._run_linear_probe_on_model(model)
+        
+        # Merge final linear probe accuracy into the main logger test_metrics
+        logger.set_test_metrics({
+            "accuracy": probe_logger.test_metrics["accuracy"], 
+            "precision": 0.0, "recall": 0.0, "f1": 0.0
+        })
+        logger.save()
+        return logger
+
+    def run_freeze_representation(self, num_retrains: int = 5) -> Dict[str, float]:
+        """Freezes representation and repeatedly retrains the head to test stability."""
+        print("\n" + "="*60)
+        print(f"DIAGNOSTIC: Freeze Representation ({num_retrains} retrains)")
+        print("="*60)
+        self._set_seed(self.config.seed)
+        model = self._create_eglp_network()
+        controller = ThresholdController(
+            budget=self.config.event_budget,
+            threshold_factor=self.config.threshold_factor,
+            max_signal=self.config.max_signal,
+        )
+        base_logger = MetricsLogger("diagnostic_freeze_base", self.config.output_dir)
+        
+        print("Phase 1: Training full EGLP model...")
+        self._run_eglp_training(
+            model, controller, base_logger, "Freeze Base Model",
+            use_cosine_lr=self.config.cosine_lr,
+            use_homeostasis=self.config.use_homeostasis,
+            use_consolidation=self.config.use_consolidation,
+            train_output=True,
+            train_hidden=True,
+        )
+        
+        print(f"Phase 2: Freezing features and retraining output {num_retrains} times...")
+        retrain_accs = []
+        for i in range(num_retrains):
+            print(f"\n  Retrain {i+1}/{num_retrains}...")
+            # Reinitialize output layer
+            model.output_layer.reset_parameters()
+            
+            retrain_logger = MetricsLogger(f"diagnostic_freeze_retrain_{i}", self.config.output_dir)
+            self._run_eglp_training(
+                model, controller, retrain_logger, f"Retrain {i}",
+                train_output=True,
+                train_hidden=False, # Freeze hidden
+            )
+            
+            test_loss, test_metrics = self._evaluate(model, self.test_loader)
+            retrain_accs.append(test_metrics["accuracy"])
+            
+        mean_acc = sum(retrain_accs) / len(retrain_accs)
+        std_acc = (sum((x - mean_acc) ** 2 for x in retrain_accs) / len(retrain_accs)) ** 0.5
+        
+        print(f"\n--- Freeze Representation Results ---")
+        print(f"  Mean Accuracy: {mean_acc:.4f} ± {std_acc:.4f}")
+        for i, acc in enumerate(retrain_accs):
+            print(f"    Run {i+1}: {acc:.4f}")
+            
+        return {"mean": mean_acc, "std": std_acc, "runs": retrain_accs}
     
     def run_layer_sensitivity(self) -> Dict[str, MetricsLogger]:
         """Enable/disable events selectively for early vs. late layers.
@@ -618,12 +1015,13 @@ class ExperimentRunner:
             print(f"\nConfiguration: {config_name} (mask={mask})")
             self._set_seed(self.config.seed)
             
-            model = self._create_eglp_network()
+            model = self._create_eglp_basic_network()
             model.set_layer_event_mask(mask)
             
             controller = ThresholdController(
                 budget=self.config.event_budget,
                 threshold_factor=self.config.threshold_factor,
+                max_signal=self.config.max_signal,
             )
             logger = MetricsLogger(f"sensitivity_{config_name}", self.config.output_dir)
             
@@ -647,7 +1045,7 @@ class ExperimentRunner:
         # Train model on clean data
         print("Training on clean MNIST...")
         self._set_seed(self.config.seed)
-        model = self._create_eglp_network()
+        model = self._create_eglp_basic_network()
         controller = ThresholdController(
             budget=self.config.event_budget,
             threshold_factor=self.config.threshold_factor,
@@ -670,44 +1068,60 @@ class ExperimentRunner:
                 optimizer.step()
                 
                 error_signal = controller.should_trigger(loss.item())
-                model.local_update_all(error_signal)
+                model.local_update_all(error_signal, logits=output, target=target)
                 model.clear_activations()
         
         results = {}
         
         # Test on clean data
-        clean_loss, clean_acc = self._evaluate(model, self.test_loader, is_eglp=True)
-        print(f"Clean test accuracy: {clean_acc:.4f}")
+        clean_loss, clean_metrics = self._evaluate(model, self.test_loader, is_eglp=True)
+        print(f"Clean test accuracy: {clean_metrics['accuracy']:.4f}")
         
         clean_logger = MetricsLogger("robustness_clean", self.config.output_dir)
         clean_logger.log_epoch(EpochMetrics(
             epoch=0, train_loss=0, train_accuracy=0,
-            val_loss=clean_loss, val_accuracy=clean_acc
+            val_loss=clean_loss, val_accuracy=clean_metrics["accuracy"],
+            val_precision=clean_metrics["precision"],
+            val_recall=clean_metrics["recall"],
+            val_f1=clean_metrics["f1"],
         ))
+        clean_logger.set_test_metrics(clean_metrics)
         results["clean"] = clean_logger
         
+        # Setup base transforms
+        if self.config.dataset == "cifar10":
+            base_norm = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))
+            DsClass = torchvision.datasets.CIFAR10
+        else:
+            base_norm = transforms.Normalize((0.1307,), (0.3081,))
+            DsClass = torchvision.datasets.MNIST
+
         # Test on noisy data
         print("Testing on noisy data...")
         noisy_transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,)),
+            base_norm,
             transforms.Lambda(lambda x: x + 0.3 * torch.randn_like(x)),  # Add noise
             transforms.Lambda(lambda x: x.view(-1)),
         ])
         
-        noisy_dataset = torchvision.datasets.MNIST(
+        noisy_dataset = DsClass(
             root="./data", train=False, download=True, transform=noisy_transform
         )
         noisy_loader = DataLoader(noisy_dataset, batch_size=self.config.batch_size)
         
-        noisy_loss, noisy_acc = self._evaluate(model, noisy_loader, is_eglp=True)
-        print(f"Noisy test accuracy: {noisy_acc:.4f}")
+        noisy_loss, noisy_metrics = self._evaluate(model, noisy_loader, is_eglp=True)
+        print(f"Noisy test accuracy: {noisy_metrics['accuracy']:.4f}")
         
         noisy_logger = MetricsLogger("robustness_noisy", self.config.output_dir)
         noisy_logger.log_epoch(EpochMetrics(
             epoch=0, train_loss=0, train_accuracy=0,
-            val_loss=noisy_loss, val_accuracy=noisy_acc
+            val_loss=noisy_loss, val_accuracy=noisy_metrics["accuracy"],
+            val_precision=noisy_metrics["precision"],
+            val_recall=noisy_metrics["recall"],
+            val_f1=noisy_metrics["f1"],
         ))
+        noisy_logger.set_test_metrics(noisy_metrics)
         results["noisy"] = noisy_logger
         
         # Test on rotated data
@@ -715,23 +1129,27 @@ class ExperimentRunner:
         rotated_transform = transforms.Compose([
             transforms.RandomRotation(degrees=(-30, 30)),
             transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,)),
+            base_norm,
             transforms.Lambda(lambda x: x.view(-1)),
         ])
         
-        rotated_dataset = torchvision.datasets.MNIST(
+        rotated_dataset = DsClass(
             root="./data", train=False, download=True, transform=rotated_transform
         )
         rotated_loader = DataLoader(rotated_dataset, batch_size=self.config.batch_size)
         
-        rotated_loss, rotated_acc = self._evaluate(model, rotated_loader, is_eglp=True)
-        print(f"Rotated test accuracy: {rotated_acc:.4f}")
+        rotated_loss, rotated_metrics = self._evaluate(model, rotated_loader, is_eglp=True)
+        print(f"Rotated test accuracy: {rotated_metrics['accuracy']:.4f}")
         
         rotated_logger = MetricsLogger("robustness_rotated", self.config.output_dir)
         rotated_logger.log_epoch(EpochMetrics(
             epoch=0, train_loss=0, train_accuracy=0,
-            val_loss=rotated_loss, val_accuracy=rotated_acc
+            val_loss=rotated_loss, val_accuracy=rotated_metrics["accuracy"],
+            val_precision=rotated_metrics["precision"],
+            val_recall=rotated_metrics["recall"],
+            val_f1=rotated_metrics["f1"],
         ))
+        rotated_logger.set_test_metrics(rotated_metrics)
         results["rotated"] = rotated_logger
         
         return results
@@ -780,6 +1198,8 @@ class ExperimentRunner:
         # EGLP variants
         all_results["eglp_fixed"] = self.run_eglp_fixed()
         all_results["eglp_triggered"] = self.run_eglp_triggered()
+        all_results["eglp_baseline"] = self.run_eglp()
+        all_results["eglp"] = self.run_eglp_v2()
         
         # Print summary
         print("\n" + "="*60)
@@ -792,5 +1212,11 @@ class ExperimentRunner:
             print(f"  Final Val Accuracy: {summary.get('final_val_accuracy', 0):.4f}")
             print(f"  Best Val Accuracy: {summary.get('best_val_accuracy', 0):.4f}")
             print(f"  Total Events: {summary.get('total_events', 0)}")
+            if 'test_metrics' in summary:
+                tm = summary['test_metrics']
+                print(f"  Test Accuracy:  {tm['accuracy']:.4f}")
+                print(f"  Test Precision: {tm['precision']:.4f}")
+                print(f"  Test Recall:    {tm['recall']:.4f}")
+                print(f"  Test F1:        {tm['f1']:.4f}")
         
         return all_results

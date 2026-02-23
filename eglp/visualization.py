@@ -295,53 +295,86 @@ def plot_training_curves(
     output_dir: str = "./results",
     save_name: str = "training_curves.png",
 ) -> None:
-    """Generic function to plot training curves for any set of experiments."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    """Generic function to plot training curves for any set of experiments.
     
-    # Color scheme generator
-    prop_cycle = plt.rcParams['axes.prop_cycle']
-    colors = prop_cycle.by_key()['color']
+    Shows both training and validation curves with distinct colors:
+    - Train curves: orange (#e67e22), dashed
+    - Validation curves: blue (#2980b9), solid
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Fixed colors: train = orange, val = blue
+    TRAIN_COLOR = "#e67e22"
+    VAL_COLOR = "#2980b9"
+    
+    # Track whether we've added the train/val legend entries
+    train_legend_added = False
+    val_legend_added = False
     
     for i, (name, logger) in enumerate(results.items()):
         if hasattr(logger, 'get_plot_data'):
             data = logger.get_plot_data()
             epochs_1indexed = [e + 1 for e in data["epochs"]]
-            color = colors[i % len(colors)]
             
-            # Accuracy
+            # Accuracy subplot
+            ax1.plot(
+                epochs_1indexed, 
+                data["train_accuracy"],
+                label="Train" if not train_legend_added else None,
+                linewidth=2,
+                linestyle='--',
+                color=TRAIN_COLOR,
+                marker='s',
+                markersize=3,
+            )
             ax1.plot(
                 epochs_1indexed, 
                 data["val_accuracy"],
-                label=name,
+                label="Validation" if not val_legend_added else None,
                 linewidth=2,
+                color=VAL_COLOR,
                 marker='o',
-                markersize=4,
-                color=color
+                markersize=3,
             )
             
-            # Loss
+            # Loss subplot
             ax2.plot(
                 epochs_1indexed,
-                data["train_loss"], # Using train loss as val loss might be infrequent/noisy
-                label=name,
+                data["train_loss"],
+                label="Train" if not train_legend_added else None,
                 linewidth=2,
                 linestyle='--',
-                color=color
+                color=TRAIN_COLOR,
+                marker='s',
+                markersize=3,
             )
+            if data["val_loss"] and data["val_loss"][0] is not None:
+                ax2.plot(
+                    epochs_1indexed,
+                    data["val_loss"],
+                    label="Validation" if not val_legend_added else None,
+                    linewidth=2,
+                    color=VAL_COLOR,
+                    marker='o',
+                    markersize=3,
+                )
+            
+            train_legend_added = True
+            val_legend_added = True
 
     # Styling
     ax1.set_xlabel("Epoch", fontsize=12)
-    ax1.set_ylabel("Validation Accuracy", fontsize=12)
-    ax1.set_title("Validation Accuracy", fontsize=14, fontweight='bold')
-    ax1.legend()
+    ax1.set_ylabel("Accuracy", fontsize=12)
+    ax1.set_title("Training & Validation Accuracy", fontsize=14, fontweight='bold')
+    ax1.legend(fontsize=10)
     ax1.grid(True, alpha=0.3)
     ax1.set_ylim([0, 1.05])
     ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
     
     ax2.set_xlabel("Epoch", fontsize=12)
-    ax2.set_ylabel("Training Loss", fontsize=12)
-    ax2.set_title("Training Loss", fontsize=14, fontweight='bold')
-    ax2.legend()
+    ax2.set_ylabel("Loss", fontsize=12)
+    ax2.set_title("Training & Validation Loss", fontsize=14, fontweight='bold')
+    ax2.legend(fontsize=10)
     ax2.grid(True, alpha=0.3)
     ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
     
@@ -350,3 +383,4 @@ def plot_training_curves(
     fig.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"Training curves saved to {output_path}")
+

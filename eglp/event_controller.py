@@ -12,9 +12,10 @@ from typing import List, Optional
 
 
 # Maximum signal magnitude to prevent Hebbian updates from destabilizing features.
-# With local_lr=0.01, a signal of 0.1 gives effective update = 0.001, which is
-# small enough to let the output layer converge while still refining features.
-DEFAULT_MAX_SIGNAL = 0.1
+# With local_lr=0.0001, a signal of 0.5 gives effective update = 5e-5, which
+# allows meaningful feature refinement while remaining conservative enough
+# for the output layer to converge.
+DEFAULT_MAX_SIGNAL = 1.0
 
 
 class EventController(ABC):

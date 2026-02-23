@@ -214,9 +214,11 @@ class TestLocalLayer:
             f"Weights exploded! Initial: {initial_norm:.2f}, Final: {final_norm:.2f}"
     
     def test_weight_clipping(self):
-        """Test that weight clipping is enforced."""
-        clip_val = 0.5
-        layer = LocalLinear(100, 50, lr=0.5, weight_clip=clip_val)
+        """Test that max-norm constraint prevents weight explosion."""
+        layer = LocalLinear(100, 50, lr=0.5)
+        
+        # Record initial row norm
+        init_max_norm = layer._init_row_norm * 2.0  # 2x headroom
         
         # Many aggressive updates
         for _ in range(50):
@@ -224,10 +226,10 @@ class TestLocalLayer:
             _ = layer(x)
             layer.local_update(event=2.0)  # Strong error signal
         
-        assert layer.weight.data.max() <= clip_val, \
-            f"Weights exceeded clip value {clip_val}: max={layer.weight.data.max()}"
-        assert layer.weight.data.min() >= -clip_val, \
-            f"Weights below -clip value {clip_val}: min={layer.weight.data.min()}"
+        # Row norms should not exceed 2x the initial norm
+        row_norms = layer.weight.data.norm(dim=1)
+        assert row_norms.max() <= init_max_norm + 1e-5, \
+            f"Row norms exceeded max {init_max_norm:.3f}: max={row_norms.max():.3f}"
     
     def test_error_signal_scales_update(self):
         """Test that larger error signal produces larger weight change."""

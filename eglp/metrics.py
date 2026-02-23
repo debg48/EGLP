@@ -37,6 +37,7 @@ class MetricsLogger:
         self.epochs: List[EpochMetrics] = []
         self.total_events = 0
         self.total_flops = 0.0
+        self.test_metrics: Optional[Dict[str, float]] = None
     
     def log_epoch(self, metrics: EpochMetrics) -> None:
         """Log metrics for an epoch."""
@@ -44,12 +45,16 @@ class MetricsLogger:
         self.total_events += metrics.events_triggered
         self.total_flops += metrics.flops_estimate
     
+    def set_test_metrics(self, metrics: Dict[str, float]) -> None:
+        """Store dedicated test-set evaluation metrics."""
+        self.test_metrics = metrics
+    
     def get_summary(self) -> Dict:
         """Get summary statistics."""
         if not self.epochs:
             return {}
         
-        return {
+        summary = {
             "experiment_name": self.experiment_name,
             "total_epochs": len(self.epochs),
             "final_train_accuracy": self.epochs[-1].train_accuracy,
@@ -62,6 +67,9 @@ class MetricsLogger:
             "total_flops": self.total_flops,
             "communication_cost": self.total_events,  # Alias for clarity
         }
+        if self.test_metrics:
+            summary["test_metrics"] = self.test_metrics
+        return summary
     
     def save(self, filename: Optional[str] = None) -> str:
         """Save metrics to JSON file."""
@@ -74,6 +82,8 @@ class MetricsLogger:
             "summary": self.get_summary(),
             "epochs": [asdict(e) for e in self.epochs],
         }
+        if self.test_metrics:
+            data["test_metrics"] = self.test_metrics
         
         with open(filepath, "w") as f:
             json.dump(data, f, indent=2)

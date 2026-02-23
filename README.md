@@ -1,144 +1,129 @@
-# Event-Gated Local Plasticity (EGLP): A Biologically Plausible Learning Framework
+# Event-Gated Local Plasticity (EGLP)
 
-**Event-Gated Local Plasticity (EGLP)** is a PyTorch-based framework for experimenting with biologically plausible learning rules as an alternative to standard backpropagation.
+A PyTorch framework for experimenting with biologically plausible learning rules as alternatives to backpropagation.
 
-This project implements a hybrid learning approach where:
+## Architecture
 
-1. **Local Plasticity**: Individual layers update their weights based on local pre-synaptic and post-synaptic activity (Hebbian-like learning).
-2. **Event Gating**: A global scalar signal ("event"), approximating neuromodulatory release (e.g., dopamine), gates these local updates.
+EGLP employs a hybrid training strategy:
 
-The goal is to explore how sparse, global feedback signals can coordinate local learning rules to solve tasks like MNIST digit classification without the non-local error signal propagation required by backpropagation.
+1. **Hidden Layers** — trained via local Hebbian rules (Oja's rule), gated by a global scalar signal
+2. **Output Layer** — a linear readout trained via standard supervision (backprop on one layer)
+3. **Event Controllers** — decide when to broadcast learning signals (Fixed Rate, Threshold-Triggered, Always-On, Never)
 
-## 🔑 Key Features
+Advanced features include Predictive Coding layers (generative matrix G, lateral inhibition V), Direct Feedback Alignment (DFA), synaptic consolidation, homeostatic scaling, and cosine LR scheduling.
 
-- **Biologically Plausible Learning**: Custom `LocalLinear` and `LocalConv2d` layers that implement local update rules, avoiding global gradient chains.
-- **Event-Based Modulation**: Supports multiple event generation strategies:
-  - **Fixed Rate**: Events occur randomly at a set frequency (e.g., $\epsilon=0.1$).
-  - **Threshold-Triggered**: Events are triggered by an `EventController` when the loss exceeds a dynamic threshold.
-  - **Always-On**: Pure Hebbian learning baseline.
-- **Comprehensive Benchmarking**: Includes a complete experimental suite to compare EGLP against:
-  - Standard Backpropagation (performance upper bound).
-  - Pure Local / Hebbian Learning (performance lower bound).
-- **Analysis Tools**: Built-in modules for ablation studies, linear probing of representation quality, layer sensitivity analysis, and robustness testing on noisy/rotated data.
-
-## 📦 Installation & Requirements
-
-1. **Clone the Repository**:
-
-    ```bash
-    git clone https://github.com/yourusername/EGLP.git
-    cd EGLP
-    ```
-
-2. **Install Dependencies**:
-    Requires Python 3.8+ and PyTorch.
-
-    ```bash
-    pip install -r requirements.txt
-    # Note: Requires scikit-learn for metrics calculation
-    ```
-
-## 🚀 Usage Guide
-
-The framework is driven by a single entry point `main.py` which handles configuration, training, and evaluation.
-
-### Basic Command
+## Installation
 
 ```bash
-python main.py --experiment <EXPERIMENT_NAME> [OPTIONS]
+git clone https://github.com/yourusername/EGLP.git
+cd EGLP
+python3 -m venv env && source env/bin/activate
+pip install -r requirements.txt
 ```
 
-### Command-Line Arguments
-
-| Argument | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--experiment` | `str` | `all` | The experiment to run. Options: `all`, `backprop`, `pure_local`, `eglp_fixed`, `eglp_triggered`, `ablation_rate`, `linear_probe`, `layer_sensitivity`, `robustness`. |
-| `--epochs` | `int` | `30` | Number of training epochs. |
-| `--batch_size` | `int` | `128` | Batch size for training and evaluation. |
-| `--local_lr` | `float` | `0.0001` | Learning rate for local updates. |
-| `--event_budget` | `int` | `1000` | Maximum number of events for the `ThresholdController`. |
-| `--event_rate` | `float` | `0.05` | Probability of an event for `FixedRateController`. |
-| `--seed` | `int` | `42` | Random seed for reproducibility. |
-| `--output_dir` | `str` | `./results`| Directory to save logs, metrics, and plots. |
-| `--plot` | `flag` | `False` | If set, generates plots automatically after experiments complete. |
-| `--threshold_factor` | `float` | `2.0` | Multiplier for mean loss to set dynamic threshold. |
-
-## 🧪 Reproducible Experiments
-
-### 1. Main Benchmarking (Table 1 Replication)
-
-To compare EGLP against baselines (Backprop and Pure Hebbian):
+## Quick Start
 
 ```bash
-# Run standard backpropagation baseline
-python main.py --experiment backprop --epochs 30 --hidden_dims "256,128"
+source env/bin/activate
 
-# Run pure local learning (events always on) - Lower Bound
-python main.py --experiment pure_local --epochs 30 --hidden_dims "256,128"
+# Run backprop baseline
+python3 main.py --experiment backprop --epochs 10 --hidden_dims "256,128" --plot
 
-# Run EGLP with triggered events (dynamic thresholding) - Main Method
-python main.py --experiment eglp_triggered --epochs 30 --event_budget 1000 --threshold_factor 2.0 --hidden_dims "256,128"
+# Run EGLP-Triggered
+python3 main.py --experiment eglp_triggered --epochs 10 --hidden_dims "256,128" --plot
 
+# Run all experiments
+python3 main.py --experiment all --epochs 10 --hidden_dims "256,128" --plot
 ```
 
-### 2. Fair Comparison (Constrained Architecture)
+## Validation Pipeline
 
-To compare EGLP against Backprop in a regime where Backprop doesn't trivially solve the task (accuracy ~70-80%), use the restricted architecture with **3 hidden neurons**:
+`validate.py` implements a rigorous 6-phase verification protocol:
 
 ```bash
-# Standard Backprop Baseline (Restricted)
-python3 main.py --experiment backprop --hidden_dims "3" --epochs 20 --plot
+# Phase 1: Verify core claims (~7 min)
+python3 validate.py --phase phase1 --epochs 10
 
-# EGLP with Threshold Triggering (Restricted)
-python3 main.py --experiment eglp_triggered --hidden_dims "3" --epochs 20 --plot
+# Phase 2: Depth/width scaling study (~15 min)
+python3 validate.py --phase scaling --epochs 10
+
+# Phase 3: Structural ablations (~2 min)
+python3 validate.py --phase ablation --epochs 10
+
+# Phase 4: Robustness tests (~1 min)
+python3 validate.py --phase robustness --epochs 10
+
+# Phase 5–6: Scaling laws + report (instant)
+python3 validate.py --phase scaling_laws
+python3 validate.py --phase report
+
+# Run ALL phases end-to-end (~25 min)
+python3 validate.py --phase all --epochs 10
 ```
 
-### 3. Ablation Study: Event Rate
+Results are saved as JSON to `results/validation/`.
 
-Analyze the trade-off between communication cost (event rate) and accuracy. This sweeps event rates $\epsilon \in [0, 1]$.
+## Experimental Results
 
-```bash
-python main.py --experiment ablation_rate --plot
-```
+### Phase 1 — Verification (MNIST & CIFAR-10, [256,128])
 
-### 3. Representation Quality: Linear Probe
+| Test | MNIST | CIFAR-10 | Finding |
+| --- | --- | --- | --- |
+| Multi-seed stability | PL 86.2%, Trig 86.0% | — | Identical — event gating irrelevant |
+| Hard zero event | 87.1% | 33.5% | Zero Event = Random Features. Error signal irrelevant |
+| Unsupervised Hebbian | **11.4%** vs Random 87.3% | **14.8%** vs Random 35.3% | **Hebbian destroys initialization** |
 
-Freeze the EGLP-trained backbone and train a linear classifier on top to evaluate the quality of the learned representations.
+### Phase 2 — Scaling (MNIST)
 
-```bash
-python main.py --experiment linear_probe
-```
+| Depth (width=256) | Accuracy | Width (depth=2) | Accuracy |
+| --- | --- | --- | --- |
+| 2 layers | 90.2% | 128 neurons | 84.6% |
+| 4 layers | 82.7% | 256 neurons | 90.2% |
+| 6 layers | 73.7% | 512 neurons | 93.4% |
+| 8 layers | 64.1% | 768 neurons | 94.6% |
 
-### 4. Robustness: Distribution Shift
+**Deeper = worse** (credit assignment degrades). **Wider = better** (random projection scaling law).
 
-Evaluate the model's performance on Noisy (Gaussian noise) and Rotated MNIST sets to test generalization capability.
+### Phase 3 — Ablations
 
-```bash
-python main.py --experiment robustness
-```
+| Component Removed | Accuracy | Effect |
+| --- | --- | --- |
+| Reference EGLP-V2 | 86.3% | — |
+| Generative Matrix (G) | 87.1% | G hurts (+0.8%) |
+| Lateral Inhibition (V) | 86.3% | No effect |
+| Consolidation | 86.3% | No effect |
+| kWTA replacement | 82.9% | Sparsity hurts (−3.4%) |
 
-### 5. Run Full Suite
+## Codebase Structure
 
-To execute all experiments and generate a comprehensive report:
-
-```bash
-python main.py --experiment all --plot
-```
-
-## � Codebase Structure
-
-```
+```text
 EGLP/
-├── main.py                 # Entry point for all experiments
+├── main.py                  # Entry point for individual experiments
+├── validate.py              # 6-phase validation pipeline
+├── requirements.txt
 ├── eglp/
-│   ├── experiment_runner.py # Core logic for running training loops and collecting metrics
-│   ├── network.py           # EGLPNetwork wrapper and MLP/CNN factory functions
-│   ├── local_layer.py       # Custom autograd functions for local update rules
-│   ├── event_controller.py  # Logic for event triggering (Threshold, FixedRate)
-│   ├── metrics.py           # Logging, CKA analysis, and FLOPs estimation
+│   ├── experiment_runner.py # Training loops and experiment configurations
+│   ├── network.py           # EGLPNetwork, AdaptiveEGLPNetwork, factory functions
+│   ├── local_layer.py       # LocalLinear, LocalConv2d, LocalPredictiveLayer
+│   ├── event_controller.py  # Threshold, FixedRate, AlwaysOn, Never controllers
+│   ├── metrics.py           # MetricsLogger, CKA, FLOPs estimation
 │   └── visualization.py     # Plotting utilities
+├── tests/
+│   ├── test_no_grad_leak.py # Verify no gradient leakage in hidden layers
+│   ├── test_metrics.py      # Test metrics computation
+│   └── test_features.py     # Test feature extraction
+└── results/
+    ├── commands.txt          # All experiment commands
+    ├── results.txt           # Latest benchmark results
+    └── validation/           # Validation pipeline JSON outputs
 ```
 
-## 📝 Citation
+## Key Findings
 
-If you use this code in your research, please cite:
+The validation pipeline reveals that the current EGLP framework functions as a **random feature network** with a trained linear classifier. The ~91% accuracy on MNIST is entirely explained by random projections through wide hidden layers + a supervised output layer. The Hebbian learning rule (Oja's rule) does not learn useful features — it actively degrades the random initialization.
+
+## Tests
+
+```bash
+python3 -m pytest tests/ -v
+```
